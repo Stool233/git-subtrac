@@ -3,16 +3,17 @@ package subtrac
 import (
 	"bufio"
 	"fmt"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/filemode"
-	"github.com/go-git/go-git/v5/plumbing/object"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 // A Trac represents a commit or tree somewhere in the project's hierarchy,
@@ -51,6 +52,12 @@ type Cache struct {
 	tracs       map[plumbing.Hash]*Trac // object lookup cache
 	srPaths     []string                // subrepo paths cache
 	srRepos     []*git.Repository       // subrepo object cache
+
+	config *Config
+}
+
+type Config struct {
+	includeSrs map[string]bool
 }
 
 func NewCache(rdir string, r *git.Repository, excludes []string,
@@ -96,6 +103,32 @@ func NewCache(rdir string, r *git.Repository, excludes []string,
 				c.exclude(hash)
 			}
 		}
+	}
+
+	f, err = wt.Filesystem.Open(".gitsubtrac")
+	if err == nil {
+		c.config = &Config{
+			includeSrs: make(map[string]bool),
+		}
+		r := bufio.NewReader(f)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				break
+			}
+			// trim comments
+			pos := strings.Index(line, "#")
+			if pos >= 0 {
+				line = line[:pos]
+			}
+			// trim whitespace
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "path = ") {
+				path := strings.TrimPrefix(line, "path = ")
+				c.config.includeSrs[path] = true
+			}
+		}
+		c.infof("includeSrs: %v\n", c.config.includeSrs)
 	}
 
 	return &c, nil
@@ -322,7 +355,7 @@ func (c *Cache) newTracCommit(commit *object.Commit, tracs []*object.Commit, hea
 		// prevents that from working and uses the local timezone
 		// instead. We want the generated commits to be identical
 		// no matter who generates them, so let's force UTC instead.
-		When:  commit.Committer.When.In(time.UTC),
+		When: commit.Committer.When.In(time.UTC),
 	}
 	emptyTree := object.Tree{}
 	nec := c.repo.Storer.NewEncodedObject()
@@ -387,6 +420,12 @@ func (c *Cache) allSubrepos() (paths []string, repos []*git.Repository, err erro
 
 	var recurse func(string, *git.Repository) error
 	recurse = func(path string, r *git.Repository) error {
+
+		if c.excludeSr(path) {
+			c.infof("git submodule(%s): excluded; skipping\n", path)
+			return nil
+		}
+
 		wt, err := r.Worktree()
 		if err != nil {
 			return fmt.Errorf("git worktree(%s): %v", path, err)
@@ -401,6 +440,10 @@ func (c *Cache) allSubrepos() (paths []string, repos []*git.Repository, err erro
 				subpath += "/modules/"
 			}
 			subpath += sub.Config().Name
+			if c.excludeSr(subpath) {
+				c.infof("git submodule(%s): excluded; skipping\n", subpath)
+				continue
+			}
 
 			ss, err := sub.Status()
 			if err != nil {
@@ -575,4 +618,12 @@ func (c *Cache) tracTree(path string, tree *object.Tree) (*Trac, error) {
 func (c *Cache) add(trac *Trac) {
 	c.debugf("  add %.10v %v\n", trac.hash, trac.name)
 	c.tracs[trac.hash] = trac
+}
+
+func (c *Cache) includeSr(sr string) bool {
+	return sr != "" && c.config != nil && c.config.includeSrs[sr]
+}
+
+func (c *Cache) excludeSr(sr string) bool {
+	return sr != "" && c.config != nil && !c.config.includeSrs[sr]
 }

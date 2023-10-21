@@ -1,0 +1,4 @@
+[subtrac "dep-use-subtrac"]
+        path = dep-use-subtrac
+        remote-url = ../dep-use-subtrac
+
